@@ -1,0 +1,11 @@
+2026-10-12 11:23:17.501 INFO    [ExchangeServer] Stock exchange listening on port 5000, companies: [AAPL, AMZN, GOOG, MSFT, TSLA]
+2026-10-12 11:23:44.922 INFO    [ClientSession] Client connected from /127.0.0.1:58228
+2026-10-12 11:23:44.941 INFO    [ClientSession] [test@/127.0.0.1:58228] LOGIN test -> OK WELCOME test (7663 us)
+2026-10-12 11:23:54.602 INFO    [ClientSession] [test@/127.0.0.1:58228] BUY GOOG 10 100.00 -> OK ORDER 1 (4181 us)
+2026-10-12 11:23:55.461 INFO    [ClientSession] [test@/127.0.0.1:58228] BUY GOOG 10 100.00 -> OK ORDER 2 (346 us)
+2026-10-12 11:23:56.443 INFO    [ClientSession] [test@/127.0.0.1:58228] BUY GOOG 10 100.00 -> OK ORDER 3 (217 us)
+2026-10-12 11:24:08.228 INFO    [ClientSession] [test@/127.0.0.1:58228] CANCEL 3 -> OK CANCELLED 3 (600 us)
+2026-10-12 11:24:11.695 INFO    [ClientSession] Client test@/127.0.0.1:58228 disconnected
+2026-10-12 11:24:20.895 INFO    [ClientSession] Client connected from /127.0.0.1:58282
+2026-10-12 11:24:20.898 INFO    [ClientSession] [test@/127.0.0.1:58282] LOGIN test -> OK WELCOME test (291 us)
+2026-10-12 11:24:24.495 INFO    [ClientSession] Client test@/127.0.0.1:58282 disconnected
