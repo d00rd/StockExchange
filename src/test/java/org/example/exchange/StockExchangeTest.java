@@ -114,6 +114,24 @@ class StockExchangeTest {
     }
 
     @Test
+    void pricesWithExtraTrailingZerosAreAccepted() {
+        assertEquals(p("10.50"), exchange.placeOrder("a", "ACME", Side.BUY, 1, p("10.500")).price());
+        assertEquals(p("100.00"), exchange.placeOrder("a", "ACME", Side.BUY, 1, p("100")).price());
+        assertThrows(ExchangeException.class, () -> exchange.placeOrder("a", "ACME", Side.BUY, 1, p("10.505")));
+    }
+
+    @Test
+    void buyingFromAnOfferTakesAtMostWhatIsLeft() {
+        Order offer = exchange.placeOrder("seller", "ACME", Side.SELL, 50, p("10.00"));
+        Order bought = exchange.buyFromOffer("buyer", offer.id(), 80, p("10.00"));
+
+        assertEquals(50, bought.filled());
+        assertEquals(OrderStatus.FILLED, exchange.getOrder(offer.id()).status());
+        assertThrows(ExchangeException.class, () -> exchange.buyFromOffer("other", offer.id(), 1, p("10.00")));
+        assertThrows(ExchangeException.class, () -> exchange.buyFromOffer("seller", offer.id(), 1, p("10.00")));
+    }
+
+    @Test
     void listenersReceiveOrderAndTradeEvents() {
         List<Object> events = new CopyOnWriteArrayList<>();
         exchange.subscribe(new ExchangeListener() {

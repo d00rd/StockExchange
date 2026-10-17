@@ -7,10 +7,12 @@ A Java 23 stock exchange implemented as a TCP server with Swing clients. Buyers 
 ### Main task
 Make sure at least 3 concurrency cases are implemented in 2 ways(correct and incorrect), use relevant concurrency primitives and describe what problems they resolve(race conditions, deadlock...). Test both versions and maybe gather information on how one version is better.
 
+**Done:** see [CONCURRENCY.md](CONCURRENCY.md). It covers the price lock, two buyers on the same shares, and X + Y > available, each with a `SAFE` and an `UNSAFE` version, tests and measured results.
+
 Would be nice to add an README.md file in each folder where you make changes explaining what changed and why, helps the other teammates and the AI ;) 
 
 ### Optional
-- Right now we cannot run multiple clients on the same machine, could be something to look into.
+- Right now we cannot run multiple clients on the same machine, could be something to look into. (They do work from separate terminals; in IntelliJ, enable *Modify options -> Allow multiple instances* on the run configuration.)
 - Improving the login, implement an database
 - Improving the UI
 
@@ -40,6 +42,7 @@ Each company has its own fair `ReentrantLock` in `OrderBook`. Operations that ca
 - **Place a buy or sell:** input is validated before acquiring the company's lock. Under the lock, the engine assigns an arrival sequence, records the order, inserts it by price-time priority, and runs matching. All these steps happen as one serialized operation relative to other activity on that company's book. The same lock remains held while each trade is settled and recorded, preventing two buyers or sellers from consuming the same remaining shares.
 - **Match and settle:** while both sides exist and the best bid crosses the best ask, the engine transfers `min(bid remaining, ask remaining)`, updates both orders, records the trade, removes completed orders, then publishes events. These state changes occur under the company lock. The optional `settlementDelay` simulates a transaction in progress while keeping the book locked.
 - **Modify:** the trader must own the order, its new price and quantity are validated, and the company lock is acquired with `tryLock` up to `modifyTimeout` (2 seconds by default). If unavailable, the operation fails with a retryable exchange error. Once locked, the order must still be open. It is removed, changed, reinserted, and matching runs before releasing the lock. A price change or quantity increase loses price-time priority; a reduction at the same price retains the order's sequence.
+- **Buy from a specific offer (`TAKE`):** the client sends the offer id, the quantity and the price it saw. Under the company lock, the engine checks that the offer is still open and not more expensive than that price, gives the buyer `min(quantity, remaining)`, and records the trade. A purchase racing a price increase, another buyer, or a too-small offer can therefore never overpay or oversell. An intentionally broken `UNSAFE` mode, which checks outside the lock, exists for comparison; see [CONCURRENCY.md](CONCURRENCY.md).
 - **Cancel:** uses the same ownership check and timed company lock as modification. It only changes an open order and removes it from the book while locked. A cancel racing a match therefore either wins before the match, or observes a filled/non-open order after it; it cannot both cancel and trade the same shares.
 - **Read an order or book:** `getOrder` and `openOrders(symbol)` acquire the relevant company lock and return immutable `Order` snapshots, so callers do not see partially updated mutable state. `openOrders()` visits companies in sorted symbol order and gathers each book separately.
 - **Trade history:** trades are immutable records stored in a `Collections.synchronizedList`. The accessor synchronizes around copying the history into an immutable list.
@@ -59,7 +62,9 @@ Server callbacks to `ExchangeListener` are synchronous while an order-book lock 
 
 ## Tests
 
-Run the tests with Maven as described below. `mvn test` runs 22 JUnit tests in three classes:
+Run the tests with Maven as described below. `mvn test` runs 31 JUnit tests in four classes:
+
+- `ConcurrencyCasesTest` runs the three assignment cases (price lock, same shares, X + Y > available) 200 times each in `SAFE` and `UNSAFE` mode. Safe must never break the rule; unsafe must be caught breaking it. It prints the violation rate and the time taken.
 
 - `StockExchangeTest` verifies basic matching behavior, partial fills, no match below the ask, price/time priority, price of execution, modification triggering a match, ownership and status rules, invalid inputs, and listener events.
 - `StockExchangeConcurrencyTest` uses a fixed thread pool and a `CyclicBarrier`: each competing task waits at the barrier, then all are released to make their operation at nearly the same time. The two-buyer, partial-offer, two-seller, cancel-versus-buy, and modify-versus-buy races each repeat 300 times. Assertions check that trades are exclusive, quantities never exceed orders, and final order states are consistent. Two additional tests configure a settlement delay to hold the book lock long enough to verify modification rejection/timeout behavior and that another company's book is not blocked. A stress test runs 16 trader tasks, each performing 1,000 randomized place/modify/cancel operations on two companies, then reconciles every order's filled quantity against the trade history and checks that no crossed book remains.
@@ -81,6 +86,10 @@ Start the server (the default port is 5000):
 ```powershell
 java -cp target/stock-exchange-1.0-SNAPSHOT.jar org.example.Main server 5000
 ```
+
+Optional arguments `server [port] [safe|unsafe] [settlementDelayMs]` start the intentionally broken mode and/or slow transactions down, for demonstrating the concurrency cases by hand, e.g. `server 5000 unsafe 3000`.
+
+Requires `JAVA_HOME` to point to JDK 23 (for example `C:\Program Files\Java\jdk-23`); with JDK 17 Maven fails with `invalid target release: 23`.
 
 Start one or more clients in separate terminals:
 

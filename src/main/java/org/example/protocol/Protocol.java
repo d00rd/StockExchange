@@ -11,6 +11,7 @@ import java.math.BigDecimal;
  * Line based text protocol shared by server and client.
  * <pre>
  * Client -> server: LOGIN name | BUY sym qty price | SELL sym qty price | MODIFY id qty price | CANCEL id
+ *                   TAKE offerId qty maxPrice   (buy directly from one sell offer, paying at most maxPrice)
  *                   ORDERS | TRADES | SYMBOLS | QUIT
  * Server -> client: OK text | ERR text   (one per request, in request order)
  *                   SYMBOL sym name | ORDER ... | TRADE ...   (snapshots and live events)

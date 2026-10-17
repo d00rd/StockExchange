@@ -70,6 +70,11 @@ public class ExchangeClient implements Closeable {
         return send("MODIFY " + orderId + " " + quantity + " " + price.toPlainString());
     }
 
+    /** Buys up to {@code quantity} shares from one sell offer, paying at most {@code maxPrice}. */
+    public CompletableFuture<String> take(long offerId, int quantity, BigDecimal maxPrice) {
+        return send("TAKE " + offerId + " " + quantity + " " + maxPrice.toPlainString());
+    }
+
     public CompletableFuture<String> cancel(long orderId) {
         return send("CANCEL " + orderId);
     }

@@ -149,6 +149,21 @@ class ExchangeServerIntegrationTest {
     }
 
     @Test
+    void clientCanBuyDirectlyFromAnOfferButNotAboveTheSeenPrice() throws Exception {
+        ExchangeClient seller = connect("seller", new Recorder());
+        ExchangeClient alice = connect("alice", new Recorder());
+        long offer = seller.sell("ACME", 100, TEN).get(5, TimeUnit.SECONDS);
+
+        String reply = alice.take(offer, 30, TEN).get(5, TimeUnit.SECONDS);
+        assertTrue(reply.startsWith("BOUGHT 30 @ 10.00"), reply);
+        assertEquals(70, exchange.getOrder(offer).quantity());
+
+        seller.modify(offer, 70, new BigDecimal("12.00")).get(5, TimeUnit.SECONDS);
+        assertErr(alice, "TAKE " + offer + " 10 10.00", "above your limit");
+        assertEquals(70, exchange.getOrder(offer).quantity());
+    }
+
+    @Test
     void clientCannotModifyAnotherClientsOrder() throws Exception {
         ExchangeClient alice = connect("alice", new Recorder());
         ExchangeClient mallory = connect("mallory", new Recorder());

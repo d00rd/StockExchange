@@ -1,6 +1,7 @@
 package org.example.exchange;
 
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -38,6 +39,7 @@ public class StockExchange {
     private final AtomicLong sequence = new AtomicLong();
     private final Duration settlementDelay;
     private final Duration modifyTimeout;
+    private final ConcurrencyMode mode;
 
     public StockExchange() {
         this(Duration.ZERO, Duration.ofSeconds(2));
@@ -48,8 +50,18 @@ public class StockExchange {
      * @param modifyTimeout   how long a modification/cancel waits for an ongoing transaction before being rejected
      */
     public StockExchange(Duration settlementDelay, Duration modifyTimeout) {
+        this(settlementDelay, modifyTimeout, ConcurrencyMode.SAFE);
+    }
+
+    /** @param mode synchronization used by {@link #buyFromOffer}; {@link ConcurrencyMode#UNSAFE} is for comparison */
+    public StockExchange(Duration settlementDelay, Duration modifyTimeout, ConcurrencyMode mode) {
         this.settlementDelay = Objects.requireNonNull(settlementDelay);
         this.modifyTimeout = Objects.requireNonNull(modifyTimeout);
+        this.mode = Objects.requireNonNull(mode);
+    }
+
+    public ConcurrencyMode mode() {
+        return mode;
     }
 
     public void listCompany(String symbol, String name) {
@@ -126,6 +138,90 @@ public class StockExchange {
         } finally {
             book.lock.unlock();
         }
+    }
+
+    /**
+     * Buys directly from one specific sell offer, e.g. the offer row a client clicked in the UI. The buyer gets
+     * {@code min(quantity, shares left)} at the offer's price, but never pays more than {@code maxPrice} (the price
+     * the client saw). Rejected if the offer is gone or its price went above {@code maxPrice}.
+     *
+     * @return the buyer's (already filled) order
+     */
+    public Order buyFromOffer(String trader, long offerId, int quantity, BigDecimal maxPrice) {
+        validateTrader(trader);
+        validateQuantity(quantity);
+        BigDecimal limit = validatePrice(maxPrice);
+        MutableOrder offer = orders.get(offerId);
+        if (offer == null || offer.side != Side.SELL) {
+            throw new ExchangeException("Unknown offer " + offerId);
+        }
+        if (offer.trader.equals(trader)) {
+            throw new ExchangeException("You cannot buy your own offer " + offerId);
+        }
+        OrderBook book = books.get(offer.symbol);
+        return mode == ConcurrencyMode.SAFE
+                ? buySafely(trader, book, offer, quantity, limit)
+                : buyUnsafely(trader, book, offer, quantity, limit);
+    }
+
+    /** Check and buy happen under the same lock, so nobody can change the offer in between. */
+    private Order buySafely(String trader, OrderBook book, MutableOrder offer, int quantity, BigDecimal limit) {
+        book.lock.lock();
+        try {
+            int shares = sharesAvailable(offer, quantity, limit);
+            settle();
+            return executePurchase(trader, book, offer, shares);
+        } finally {
+            book.lock.unlock();
+        }
+    }
+
+    /**
+     * INCORRECT ON PURPOSE. The offer is read without the lock, then the purchase is made later using that stale
+     * view: two buyers can both see the same shares (overselling), and a price raised in between is paid anyway.
+     * Reading the unguarded fields is also a data race (no happens-before with the writers).
+     */
+    private Order buyUnsafely(String trader, OrderBook book, MutableOrder offer, int quantity, BigDecimal limit) {
+        int shares = sharesAvailable(offer, quantity, limit);
+        settle(); // the window between "check" and "act" where other threads change the offer
+        book.lock.lock();
+        try {
+            return executePurchase(trader, book, offer, shares);
+        } finally {
+            book.lock.unlock();
+        }
+    }
+
+    /** The "check" step: how many shares the buyer may take, or an exception if the offer can't be bought. */
+    private static int sharesAvailable(MutableOrder offer, int quantity, BigDecimal limit) {
+        if (offer.status != OrderStatus.OPEN || offer.remaining <= 0) {
+            throw new ExchangeException("Offer " + offer.id + " is no longer available");
+        }
+        if (offer.price.compareTo(limit) > 0) {
+            throw new ExchangeException("Price of offer " + offer.id + " is now " + offer.price.toPlainString()
+                    + ", above your limit " + limit.toPlainString());
+        }
+        return Math.min(quantity, offer.remaining);
+    }
+
+    /** Must be called while holding {@code book.lock}. Trades at the offer's current price. */
+    private Order executePurchase(String trader, OrderBook book, MutableOrder offer, int shares) {
+        MutableOrder buy = new MutableOrder(orderIds.incrementAndGet(), trader, book.symbol, Side.BUY, shares,
+                offer.price);
+        buy.sequence = sequence.incrementAndGet();
+        orders.put(buy.id, buy);
+        buy.fill(shares);
+        offer.fill(shares);
+        Trade trade = new Trade(tradeIds.incrementAndGet(), book.symbol, trader, offer.trader,
+                buy.id, offer.id, shares, offer.price, System.currentTimeMillis());
+        trades.add(trade);
+        if (offer.status == OrderStatus.FILLED) {
+            book.remove(offer);
+        }
+        fireOrder(buy.snapshot());
+        fireTrade(trade);
+        fireOrder(offer.snapshot());
+        return buy.snapshot();
     }
 
     public Order getOrder(long orderId) {
@@ -291,7 +387,7 @@ public class StockExchange {
                 || price.stripTrailingZeros().scale() > 2) {
             throw new ExchangeException("Price must be positive, at most " + MAX_PRICE + ", with 2 decimals");
         }
-        return price.setScale(2);
+        return price.stripTrailingZeros().setScale(2, RoundingMode.UNNECESSARY);
     }
 
     private void fireOrder(Order order) {

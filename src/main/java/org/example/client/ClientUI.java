@@ -103,9 +103,13 @@ public class ClientUI extends JFrame implements ExchangeClient.Listener {
         modify.addActionListener(e -> modifySelected());
         JButton cancel = new JButton("Cancel selected");
         cancel.addActionListener(e -> cancelSelected());
+        JButton take = new JButton("Buy selected offer");
+        take.setToolTipText("Buy 'Quantity' shares from the selected offer at the price shown (never more)");
+        take.addActionListener(e -> buySelectedOffer());
         JPanel actions = new JPanel(new FlowLayout(FlowLayout.LEFT));
         actions.add(modify);
         actions.add(cancel);
+        actions.add(take);
         log.setEditable(false);
         JPanel south = new JPanel(new BorderLayout());
         south.add(actions, BorderLayout.NORTH);
@@ -170,6 +174,19 @@ public class ClientUI extends JFrame implements ExchangeClient.Listener {
             track("Modify #" + order.id() + " to " + q + " @ " + limit.toPlainString(),
                     client.modify(order.id(), q, limit));
         }
+    }
+
+    private void buySelectedOffer() {
+        int row = offerTable.getSelectedRow();
+        if (row < 0) {
+            log("Select an offer (sellers table) first");
+            return;
+        }
+        Order offer = offers.get(row);
+        int qty = (Integer) quantity.getValue();
+        // The price shown is the price we agree to pay; the server rejects the purchase if it went up meanwhile.
+        track("Take " + qty + " from offer #" + offer.id() + " @ " + offer.price().toPlainString(),
+                client.take(offer.id(), qty, offer.price()));
     }
 
     private void cancelSelected() {

@@ -26,7 +26,7 @@ final class MutableOrder {
     void fill(int shares) {
         remaining -= shares;
         filled += shares;
-        if (remaining == 0) {
+        if (remaining <= 0) {
             status = OrderStatus.FILLED;
         }
     }

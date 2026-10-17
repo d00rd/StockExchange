@@ -213,8 +213,10 @@ class StockExchangeConcurrencyTest {
 
         Order modified = exchange.modifyOrder("carol", carol.id(), 8, new BigDecimal("9.10"));
 
-        assertTrue(slowTrade.isDone(), "modification only happened after the transaction completed");
-        assertEquals(1, exchange.trades().size());
+        // The trade is recorded under the lock, so it is visible once the modification got the lock. (Checking
+        // slowTrade.isDone() here is racy: the trading thread may not have completed its Future yet.)
+        assertEquals(1, exchange.trades().size(), "modification only happened after the transaction completed");
+        assertEquals(OrderStatus.FILLED, slowTrade.get().status());
         assertEquals(8, modified.quantity());
     }
 

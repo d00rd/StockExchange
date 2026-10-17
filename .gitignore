@@ -1,0 +1,10 @@
+# Build output
+target/
+
+# Server logs
+logs/
+*.lck
+
+# Personal IntelliJ state (shared project settings in .idea/ stay tracked)
+.idea/workspace.xml
+.idea/material_theme_project_new.xml

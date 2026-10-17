@@ -8,7 +8,7 @@ import java.util.Arrays;
 /**
  * Usage:
  * <pre>
- *   java -jar stock-exchange.jar server [port]
+ *   java -jar stock-exchange.jar server [port] [safe|unsafe] [settlementDelayMs]
  *   java -jar stock-exchange.jar client [host] [port] [name]
  * </pre>
  */
@@ -19,7 +19,7 @@ public class Main {
         switch (mode) {
             case "server" -> ExchangeServer.main(rest);
             case "client" -> ClientUI.main(rest);
-            default -> System.err.println("Usage: (server [port]) | (client [host] [port] [name])");
+            default -> System.err.println("Usage: (server [port] [safe|unsafe] [delayMs]) | (client [host] [port] [name])");
         }
     }
 }

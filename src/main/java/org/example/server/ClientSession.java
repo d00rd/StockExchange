@@ -103,6 +103,12 @@ final class ClientSession implements Runnable, ExchangeListener, Closeable {
                             new BigDecimal(p[3]));
                     yield "OK MODIFIED " + o.id();
                 }
+                case "TAKE" -> {
+                    expectArgs(p, 4);
+                    Order o = exchange.buyFromOffer(trader, Long.parseLong(p[1]), Integer.parseInt(p[2]),
+                            new BigDecimal(p[3]));
+                    yield "OK BOUGHT " + o.filled() + " @ " + o.price().toPlainString() + " ORDER " + o.id();
+                }
                 case "CANCEL" -> {
                     expectArgs(p, 2);
                     Order o = exchange.cancelOrder(trader, Long.parseLong(p[1]));
