@@ -1,5 +1,6 @@
 package org.example.server;
 
+import org.example.account.AccountSnapshot;
 import org.example.exchange.ExchangeException;
 import org.example.exchange.ExchangeListener;
 import org.example.exchange.Order;
@@ -113,6 +114,20 @@ final class ClientSession implements Runnable, ExchangeListener, Closeable {
                     expectArgs(p, 2);
                     Order o = exchange.cancelOrder(trader, Long.parseLong(p[1]));
                     yield "OK CANCELLED " + o.id();
+                }
+                case "PORTFOLIO", "BALANCE" -> {
+                    AccountSnapshot snap = exchange.accountManager().snapshot(trader);
+                    if (snap == null) {
+                        snap = exchange.accountManager().getOrCreateAccount(trader).snapshot();
+                    }
+                    yield "OK " + Protocol.portfolio(snap);
+                }
+                case "DEPOSIT" -> {
+                    expectArgs(p, 2);
+                    BigDecimal amount = new BigDecimal(p[1]);
+                    exchange.deposit(trader, amount);
+                    AccountSnapshot snap = exchange.accountManager().snapshot(trader);
+                    yield "OK DEPOSITED " + amount.toPlainString() + " BALANCE " + snap.cash().toPlainString();
                 }
                 case "ORDERS" -> {
                     exchange.openOrders().forEach(o -> send(Protocol.order(o)));

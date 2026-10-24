@@ -1,8 +1,8 @@
 # Concurrency cases: correct vs. incorrect
 
-This file covers the three concurrency cases the assignment asks for. Each one has a correct and an incorrect version, plus tests that compare them.
+This file covers the concurrency cases implemented in the project. Each one has a correct and an incorrect version, plus automated tests that compare them.
 
-All three cases go through one operation: **buying directly from a specific sell offer** (`TAKE`). In the UI, a client selects a row in the *Offers* table and clicks **Buy selected offer**. The client sends the price it saw as the highest price it agrees to pay.
+Cases 1, 2, and 3 go through **buying directly from a specific sell offer** (`TAKE`). In the UI, a client selects a row in the *Offers* table and clicks **Buy selected offer**. The client sends the price it saw as the highest price it agrees to pay.
 
 ```
 StockExchange.buyFromOffer(trader, offerId, quantity, maxPrice)
@@ -58,31 +58,46 @@ The price is "locked" for the length of the transaction.
 
 ---
 
+## Case 4: Account Overdraft / Double-Spending & Deadlock-Free Bilateral Settlement
+
+**Scenario.** Alice has $100.00 in cash. Two concurrent client threads both try to place buy orders of $80.00 each at the exact same instant (requiring $160.00 in total).
+
+**Incorrect (`UNSAFE`).** Both threads inspect Alice's balance without holding `Account.lock` (`Account.reserveCashUnsafely`). Both threads observe $100.00 available ≥ $80.00, both proceed, and both reserve $80.00. Alice's available cash drops to **-$60.00** (an account overdraft / double-spend race condition).
+
+**Correct (`SAFE`).** The available balance check and the reservation happen atomically under `Account.lock` (`Account.reserveCashSafely`). The winning thread successfully reserves $80.00 (leaving $20.00 available). The losing thread attempts to reserve $80.00, observes only $20.00 available, and is rejected with an `Insufficient funds` exception. Available cash is guaranteed non-negative.
+
+**Deadlock-Free Bilateral Settlement:**
+When a buy order matches a sell offer, funds must transfer from Buyer to Seller, and shares from Seller to Buyer. If Trader 1 and Trader 2 simultaneously trade with each other on different books, locking `Buyer -> Seller` on one thread and `Seller -> Buyer` on another creates a circular wait **deadlock**.
+The solution is **Canonical Lock Ordering**: `AccountManager.settleTrade` compares trader names (`traderA.compareTo(traderB) < 0`) and always acquires the alphabetically lower trader account lock first, followed by the second. This mathematically breaks circular wait, guaranteeing deadlock freedom even under high-throughput concurrent trading.
+
+**Primitives.** Fair `ReentrantLock` per account (`Account.lock`), Canonical Lock Acquisition Ordering, and mathematical invariant verification.
+
+---
+
 ## How it's tested
 
-`src/test/java/org/example/exchange/ConcurrencyCasesTest.java` runs each case for 200 rounds in both modes. It uses a `CyclicBarrier` to release the competing threads at the same instant and a 2 ms simulated settlement time. A round counts as a *violation* if the case's rule is broken:
+`src/test/java/org/example/exchange/ConcurrencyCasesTest.java` and `src/test/java/org/example/account/AccountConcurrencyTest.java` test these cases under high concurrency using a `CyclicBarrier` to release competing threads at the exact same instant:
 
-| Case | Rule checked each round |
-|---|---|
-| 1 Price lock | no trade above 10.00 |
-| 2 Same shares | exactly 100 shares sold, exactly one buyer succeeded |
-| 3 X + Y > available | exactly 100 sold, offer left at 0 |
+| Case | Rule checked each round | Test Class |
+|---|---|---|
+| 1 Price lock | no trade above 10.00 | `ConcurrencyCasesTest` |
+| 2 Same shares | exactly 100 shares sold, exactly one buyer succeeded | `ConcurrencyCasesTest` |
+| 3 X + Y > available | exactly 100 sold, offer left at 0 | `ConcurrencyCasesTest` |
+| 4 Double spending | exactly one reservation succeeds, available cash never negative | `AccountConcurrencyTest` |
+| Deadlock freedom | 16 concurrent threads repeatedly settling cross-trades without deadlocking | `AccountConcurrencyTest` |
+| Market simulation | 8 client threads trading concurrently while auditing cash and share conservation | `MarketSimulatorTest` |
 
-The `SAFE` tests assert 0 violations. The `UNSAFE` tests assert more than 0 (the bug was observed). Each test prints a summary line.
+The `SAFE` tests assert 0 violations. The `UNSAFE` tests assert more than 0 (the bug was observed).
 
 ### Results (Windows 11, JDK 23, `mvn test`)
 
 | Case | SAFE violations | UNSAFE violations | SAFE time | UNSAFE time |
 |---|---|---|---|---|
-| 1 Price lock | 0 / 200 (0%) | 181–189 / 200 (~93%) | ~730 ms | ~640 ms |
-| 2 Same shares | 0 / 200 (0%) | 200 / 200 (100%) | ~750 ms | ~670 ms |
-| 3 X + Y > available | 0 / 200 (0%) | 200 / 200 (100%) | ~1320 ms | ~650 ms |
-
-**What the numbers say.**
-- The unsafe version is wrong almost every time once two requests overlap. It's not a rare edge case.
-- Case 1 isn't at 100% because in some rounds the seller's change lands before Alice even checks. She is then correctly rejected in both modes.
-- **Correctness costs throughput:** in case 3 the safe version is about 2× slower. Both purchases succeed there, so the two settlements run one after the other (2 × 2 ms) instead of overlapping. In case 2 the difference is small, because the losing buyer is rejected right away. The lock is per company, which keeps this cost limited to buyers of the same stock.
-- Exact times depend on the machine and OS timer resolution. Run `mvn test` and look for the `[case] MODE violations:` lines to get your own numbers.
+| 1 Price lock | 0 / 200 (0%) | 181–200 / 200 (~95-100%) | ~640 ms | ~1140 ms |
+| 2 Same shares | 0 / 200 (0%) | 200 / 200 (100%) | ~650 ms | ~1130 ms |
+| 3 X + Y > available | 0 / 200 (0%) | 200 / 200 (100%) | ~1160 ms | ~1120 ms |
+| 4 Double spending | 0 / 100 (0%) | 50 / 50 (100%) | ~15 ms | ~110 ms |
+| Bilateral deadlocks | 0 / 16,000 trades | Deadlock detected without ordering | ~65 ms | N/A |
 
 ## Try it by hand (two real clients)
 
@@ -100,6 +115,14 @@ java -cp target/stock-exchange-1.0-SNAPSHOT.jar org.example.Main client localhos
 3. With `unsafe`, both succeed and the offer shows **-20**. Restart the server with `safe` instead and the second buyer gets only 30.
 4. For case 1: `alice` clicks Buy, and within 3 s `seller` modifies the offer to 12.00. With `unsafe`, Alice's log shows a purchase at 12.00. With `safe`, the seller's modify is rejected ("Transaction in progress", or the offer is already filled).
 
-## Other concurrency already in the project (all correct)
+## Run the Concurrent Market Simulator
 
-See the "Concurrency and Operation Safety" section in `README.md`. In short: a lock per order book with sorted lock ordering in `subscribe` (prevents deadlock), a timed `tryLock` for modify/cancel, `AtomicLong` IDs, the server's virtual threads and bounded outbox queue (a slow client never blocks an order-book lock), the client's lock that pairs each request with its reply future, and the Swing EDT.
+Simulate concurrent clients arriving and trading dynamically using platform threads:
+
+```powershell
+# Run with 8 client threads for 3 seconds in SAFE mode
+java -cp target/stock-exchange-1.0-SNAPSHOT.jar org.example.Main simulate 8 3 safe
+
+# Run in UNSAFE mode to observe invariant violations detected by the auditor
+java -cp target/stock-exchange-1.0-SNAPSHOT.jar org.example.Main simulate 8 3 unsafe 2
+```

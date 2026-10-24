@@ -79,6 +79,16 @@ public class ExchangeClient implements Closeable {
         return send("CANCEL " + orderId);
     }
 
+    /** Retrieves the trader's account balances and portfolio holdings. */
+    public CompletableFuture<String> portfolio() {
+        return send("PORTFOLIO");
+    }
+
+    /** Deposits cash into the trader's exchange account. */
+    public CompletableFuture<String> deposit(BigDecimal amount) {
+        return send("DEPOSIT " + amount.toPlainString());
+    }
+
     /** Sends a raw protocol command; the future completes with the text after "OK" or fails with the ERR text. */
     public CompletableFuture<String> send(String command) {
         if (command.indexOf('\n') >= 0 || command.indexOf('\r') >= 0) {

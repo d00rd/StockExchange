@@ -1,5 +1,6 @@
 package org.example.client;
 
+import org.example.account.AccountSnapshot;
 import org.example.exchange.Order;
 import org.example.exchange.OrderStatus;
 import org.example.exchange.Side;
@@ -43,6 +44,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /** Swing trading terminal. All mutable state is only touched on the Event Dispatch Thread. */
 public class ClientUI extends JFrame implements ExchangeClient.Listener {
@@ -65,6 +68,17 @@ public class ClientUI extends JFrame implements ExchangeClient.Listener {
     private final JTextArea log = new JTextArea(6, 80);
     private JTable selectedTable = requestTable;
 
+    // Portfolio & Balance UI
+    private final JLabel portfolioLabel = new JLabel("Cash: Loading... | Reserved: $0.00 | Shares: 0");
+    private AccountSnapshot lastAccountSnapshot;
+
+    // Live Bot Simulation controls
+    private final JButton botButton = new JButton("Start 3 Bot Traders");
+    private final AtomicBoolean botsRunning = new AtomicBoolean(false);
+    private final List<ExchangeClient> botClients = new ArrayList<>();
+    private String serverHost = "localhost";
+    private int serverPort = Protocol.DEFAULT_PORT;
+
     public ClientUI(String trader) {
         super("Stock Exchange - " + trader);
         this.trader = trader;
@@ -72,13 +86,19 @@ public class ClientUI extends JFrame implements ExchangeClient.Listener {
         addWindowListener(new WindowAdapter() {
             @Override
             public void windowClosing(WindowEvent e) {
+                stopBots();
                 closeClient();
             }
         });
 
         JButton place = new JButton("Place order");
         place.addActionListener(e -> placeOrder());
-        symbolBox.addActionListener(e -> refreshBook());
+        symbolBox.addActionListener(e -> {
+            refreshBook();
+            updatePortfolioDisplay();
+        });
+
+        // Top form panel
         JPanel form = new JPanel(new FlowLayout(FlowLayout.LEFT));
         form.add(new JLabel("Symbol"));
         form.add(symbolBox);
@@ -89,6 +109,22 @@ public class ClientUI extends JFrame implements ExchangeClient.Listener {
         form.add(new JLabel("Price"));
         form.add(price);
         form.add(place);
+
+        // Account / Portfolio banner
+        JButton deposit = new JButton("Deposit Cash");
+        deposit.addActionListener(e -> depositCash());
+        botButton.addActionListener(e -> toggleBots());
+
+        JPanel portfolioPanel = new JPanel(new FlowLayout(FlowLayout.LEFT));
+        portfolioPanel.setBorder(BorderFactory.createTitledBorder("My Account & Portfolio"));
+        portfolioPanel.add(portfolioLabel);
+        portfolioPanel.add(new JLabel("   "));
+        portfolioPanel.add(deposit);
+        portfolioPanel.add(botButton);
+
+        JPanel north = new JPanel(new BorderLayout());
+        north.add(portfolioPanel, BorderLayout.NORTH);
+        north.add(form, BorderLayout.SOUTH);
 
         configureOrderTable(requestTable, offerTable);
         configureOrderTable(offerTable, requestTable);
@@ -115,16 +151,19 @@ public class ClientUI extends JFrame implements ExchangeClient.Listener {
         south.add(actions, BorderLayout.NORTH);
         south.add(titled(new JScrollPane(log), "Activity"), BorderLayout.CENTER);
 
-        getContentPane().add(form, BorderLayout.NORTH);
+        getContentPane().add(north, BorderLayout.NORTH);
         getContentPane().add(center, BorderLayout.CENTER);
         getContentPane().add(south, BorderLayout.SOUTH);
-        setSize(1000, 720);
+        setSize(1000, 750);
         setLocationByPlatform(true);
     }
 
     void connect(String host, int port) throws IOException {
+        this.serverHost = host;
+        this.serverPort = port;
         client = new ExchangeClient(host, port, this);
         track("Login as " + trader, client.login(trader));
+        refreshPortfolio();
     }
 
     private void configureOrderTable(JTable table, JTable other) {
@@ -152,6 +191,7 @@ public class ClientUI extends JFrame implements ExchangeClient.Listener {
         }
         String what = side + " " + qty + " " + symbol + " @ " + limit.toPlainString();
         track(what, side == Side.BUY ? client.buy(symbol, qty, limit) : client.sell(symbol, qty, limit));
+        refreshPortfolio();
     }
 
     private void modifySelected() {
@@ -173,6 +213,7 @@ public class ClientUI extends JFrame implements ExchangeClient.Listener {
             int q = (Integer) qty.getValue();
             track("Modify #" + order.id() + " to " + q + " @ " + limit.toPlainString(),
                     client.modify(order.id(), q, limit));
+            refreshPortfolio();
         }
     }
 
@@ -184,15 +225,131 @@ public class ClientUI extends JFrame implements ExchangeClient.Listener {
         }
         Order offer = offers.get(row);
         int qty = (Integer) quantity.getValue();
-        // The price shown is the price we agree to pay; the server rejects the purchase if it went up meanwhile.
         track("Take " + qty + " from offer #" + offer.id() + " @ " + offer.price().toPlainString(),
                 client.take(offer.id(), qty, offer.price()));
+        refreshPortfolio();
     }
 
     private void cancelSelected() {
         Order order = selectedOwnOrder();
         if (order != null) {
             track("Cancel #" + order.id(), client.cancel(order.id()));
+            refreshPortfolio();
+        }
+    }
+
+    private void depositCash() {
+        String input = JOptionPane.showInputDialog(this, "Enter cash amount to deposit:", "1000.00");
+        if (input != null && !input.isBlank()) {
+            try {
+                BigDecimal amt = new BigDecimal(input.trim());
+                track("Deposit $" + amt, client.deposit(amt));
+                refreshPortfolio();
+            } catch (Exception ex) {
+                log("Invalid amount: " + input);
+            }
+        }
+    }
+
+    private void refreshPortfolio() {
+        if (client == null) {
+            return;
+        }
+        client.portfolio().whenComplete((reply, err) -> {
+            if (err == null && reply != null) {
+                try {
+                    AccountSnapshot snap = Protocol.parsePortfolio(trader, reply);
+                    SwingUtilities.invokeLater(() -> {
+                        lastAccountSnapshot = snap;
+                        updatePortfolioDisplay();
+                    });
+                } catch (Exception ignored) {
+                }
+            }
+        });
+    }
+
+    private void updatePortfolioDisplay() {
+        if (lastAccountSnapshot == null) {
+            return;
+        }
+        String symbol = (String) symbolBox.getSelectedItem();
+        int sharesOwned = symbol != null ? lastAccountSnapshot.availableShares(symbol) : 0;
+        int sharesReserved = symbol != null ? lastAccountSnapshot.reservedHoldings().getOrDefault(symbol, 0) : 0;
+        portfolioLabel.setText(String.format("Available Cash: $%s | Reserved: $%s | %s Shares: %d (Reserved: %d)",
+                lastAccountSnapshot.cash().toPlainString(),
+                lastAccountSnapshot.reservedCash().toPlainString(),
+                symbol != null ? symbol : "-",
+                sharesOwned,
+                sharesReserved));
+    }
+
+    private void toggleBots() {
+        if (botsRunning.get()) {
+            stopBots();
+        } else {
+            startBots();
+        }
+    }
+
+    private void startBots() {
+        botsRunning.set(true);
+        botButton.setText("Stop Bot Traders");
+        log("Starting 3 simulated concurrent client threads...");
+
+        for (int i = 1; i <= 3; i++) {
+            final String botName = "bot_" + i;
+            Thread.ofPlatform().name("ui-bot-" + botName).start(() -> {
+                ExchangeClient botClient = null;
+                try {
+                    botClient = new ExchangeClient(serverHost, serverPort, new ExchangeClient.Listener() {});
+                    synchronized (botClients) {
+                        botClients.add(botClient);
+                    }
+                    botClient.login(botName).join();
+                    ThreadLocalRandom rnd = ThreadLocalRandom.current();
+
+                    while (botsRunning.get()) {
+                        if (symbols.getSize() == 0) {
+                            Thread.sleep(500);
+                            continue;
+                        }
+                        String sym = symbols.getElementAt(rnd.nextInt(symbols.getSize()));
+                        int action = rnd.nextInt(100);
+                        int qty = rnd.nextInt(5, 25);
+                        BigDecimal pr = BigDecimal.valueOf(rnd.nextDouble(95.0, 105.0)).setScale(2, java.math.RoundingMode.HALF_UP);
+
+                        if (action < 50) {
+                            botClient.buy(sym, qty, pr);
+                        } else {
+                            botClient.sell(sym, qty, pr);
+                        }
+                        Thread.sleep(rnd.nextInt(400, 1200));
+                    }
+                } catch (Exception ignored) {
+                } finally {
+                    if (botClient != null) {
+                        try {
+                            botClient.close();
+                        } catch (IOException ignored) {}
+                    }
+                }
+            });
+        }
+    }
+
+    private void stopBots() {
+        if (botsRunning.compareAndSet(true, false)) {
+            botButton.setText("Start 3 Bot Traders");
+            log("Stopping simulated bot traders...");
+            synchronized (botClients) {
+                for (ExchangeClient bc : botClients) {
+                    try {
+                        bc.close();
+                    } catch (IOException ignored) {}
+                }
+                botClients.clear();
+            }
         }
     }
 
@@ -220,8 +377,10 @@ public class ClientUI extends JFrame implements ExchangeClient.Listener {
     }
 
     private void track(String what, CompletableFuture<?> future) {
-        future.whenComplete((reply, error) -> SwingUtilities.invokeLater(() ->
-                log(error == null ? what + " -> OK " + reply : what + " -> FAILED: " + rootMessage(error))));
+        future.whenComplete((reply, error) -> SwingUtilities.invokeLater(() -> {
+            log(error == null ? what + " -> OK " + reply : what + " -> FAILED: " + rootMessage(error));
+            refreshPortfolio();
+        }));
     }
 
     private static String rootMessage(Throwable t) {
@@ -279,6 +438,7 @@ public class ClientUI extends JFrame implements ExchangeClient.Listener {
                 }
             }
             refreshBook();
+            refreshPortfolio();
         });
     }
 
@@ -289,6 +449,7 @@ public class ClientUI extends JFrame implements ExchangeClient.Listener {
             if (trade.buyer().equals(trader) || trade.seller().equals(trader)) {
                 log("You " + (trade.buyer().equals(trader) ? "bought " : "sold ") + trade.quantity() + " "
                         + trade.symbol() + " @ " + trade.price().toPlainString());
+                refreshPortfolio();
             }
         });
     }

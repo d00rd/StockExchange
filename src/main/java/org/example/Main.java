@@ -2,6 +2,7 @@ package org.example;
 
 import org.example.client.ClientUI;
 import org.example.server.ExchangeServer;
+import org.example.simulation.MarketSimulator;
 
 import java.util.Arrays;
 
@@ -10,6 +11,7 @@ import java.util.Arrays;
  * <pre>
  *   java -jar stock-exchange.jar server [port] [safe|unsafe] [settlementDelayMs]
  *   java -jar stock-exchange.jar client [host] [port] [name]
+ *   java -jar stock-exchange.jar simulate [clients] [durationSec] [safe|unsafe] [delayMs]
  * </pre>
  */
 public class Main {
@@ -19,7 +21,10 @@ public class Main {
         switch (mode) {
             case "server" -> ExchangeServer.main(rest);
             case "client" -> ClientUI.main(rest);
-            default -> System.err.println("Usage: (server [port] [safe|unsafe] [delayMs]) | (client [host] [port] [name])");
+            case "simulate", "sim" -> MarketSimulator.main(rest);
+            default -> System.err.println("Usage: (server [port] [safe|unsafe] [delayMs]) | "
+                    + "(client [host] [port] [name]) | "
+                    + "(simulate [clients] [durationSec] [safe|unsafe] [delayMs])");
         }
     }
 }

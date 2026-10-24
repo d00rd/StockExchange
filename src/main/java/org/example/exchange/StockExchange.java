@@ -1,5 +1,7 @@
 package org.example.exchange;
 
+import org.example.account.AccountManager;
+
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.time.Duration;
@@ -40,6 +42,7 @@ public class StockExchange {
     private final Duration settlementDelay;
     private final Duration modifyTimeout;
     private final ConcurrencyMode mode;
+    private final AccountManager accountManager;
 
     public StockExchange() {
         this(Duration.ZERO, Duration.ofSeconds(2));
@@ -55,19 +58,35 @@ public class StockExchange {
 
     /** @param mode synchronization used by {@link #buyFromOffer}; {@link ConcurrencyMode#UNSAFE} is for comparison */
     public StockExchange(Duration settlementDelay, Duration modifyTimeout, ConcurrencyMode mode) {
+        this(settlementDelay, modifyTimeout, mode, new AccountManager());
+    }
+
+    public StockExchange(Duration settlementDelay, Duration modifyTimeout, ConcurrencyMode mode,
+                         AccountManager accountManager) {
         this.settlementDelay = Objects.requireNonNull(settlementDelay);
         this.modifyTimeout = Objects.requireNonNull(modifyTimeout);
         this.mode = Objects.requireNonNull(mode);
+        this.accountManager = accountManager != null ? accountManager : new AccountManager();
     }
 
     public ConcurrencyMode mode() {
         return mode;
     }
 
+    public AccountManager accountManager() {
+        return accountManager;
+    }
+
+    public void deposit(String trader, BigDecimal amount) {
+        validateTrader(trader);
+        accountManager.deposit(trader, amount);
+    }
+
     public void listCompany(String symbol, String name) {
         if (symbol == null || !SYMBOL.matcher(symbol).matches()) {
             throw new ExchangeException("Invalid symbol: " + symbol);
         }
+        accountManager.registerSymbol(symbol);
         books.putIfAbsent(symbol, new OrderBook(symbol, name));
     }
 
@@ -83,6 +102,13 @@ public class StockExchange {
         validateQuantity(quantity);
         BigDecimal limit = validatePrice(price);
         OrderBook book = book(symbol);
+
+        if (side == Side.BUY) {
+            accountManager.reserveForBuy(trader, quantity, limit, mode, settlementDelay.toMillis());
+        } else {
+            accountManager.reserveForSell(trader, symbol, quantity);
+        }
+
         MutableOrder order = new MutableOrder(orderIds.incrementAndGet(), trader, book.symbol, side, quantity, limit);
         book.lock.lock();
         try {
@@ -92,6 +118,13 @@ public class StockExchange {
             fireOrder(order.snapshot());
             match(book);
             return order.snapshot();
+        } catch (RuntimeException e) {
+            if (side == Side.BUY) {
+                accountManager.releaseBuyReservation(trader, quantity, limit);
+            } else {
+                accountManager.releaseSellReservation(trader, symbol, quantity);
+            }
+            throw e;
         } finally {
             book.lock.unlock();
         }
@@ -109,6 +142,13 @@ public class StockExchange {
         lockForModification(book);
         try {
             requireOpen(order);
+            if (order.side == Side.BUY) {
+                BigDecimal oldRemainingCost = order.price.multiply(BigDecimal.valueOf(order.remaining));
+                BigDecimal newRemainingCost = limit.multiply(BigDecimal.valueOf(quantity));
+                accountManager.adjustBuyReservation(trader, newRemainingCost.subtract(oldRemainingCost));
+            } else {
+                accountManager.adjustSellReservation(trader, order.symbol, quantity - order.remaining);
+            }
             boolean losesPriority = limit.compareTo(order.price) != 0 || quantity > order.remaining;
             book.remove(order);
             order.price = limit;
@@ -133,6 +173,11 @@ public class StockExchange {
             requireOpen(order);
             book.remove(order);
             order.status = OrderStatus.CANCELLED;
+            if (order.side == Side.BUY) {
+                accountManager.releaseBuyReservation(trader, order.remaining, order.price);
+            } else {
+                accountManager.releaseSellReservation(trader, order.symbol, order.remaining);
+            }
             fireOrder(order.snapshot());
             return order.snapshot();
         } finally {
@@ -169,6 +214,7 @@ public class StockExchange {
         book.lock.lock();
         try {
             int shares = sharesAvailable(offer, quantity, limit);
+            accountManager.reserveForBuy(trader, shares, offer.price, ConcurrencyMode.SAFE, 0);
             settle();
             return executePurchase(trader, book, offer, shares);
         } finally {
@@ -183,6 +229,7 @@ public class StockExchange {
      */
     private Order buyUnsafely(String trader, OrderBook book, MutableOrder offer, int quantity, BigDecimal limit) {
         int shares = sharesAvailable(offer, quantity, limit);
+        accountManager.reserveForBuy(trader, shares, offer.price, ConcurrencyMode.UNSAFE, settlementDelay.toMillis());
         settle(); // the window between "check" and "act" where other threads change the offer
         book.lock.lock();
         try {
@@ -218,6 +265,7 @@ public class StockExchange {
         if (offer.status == OrderStatus.FILLED) {
             book.remove(offer);
         }
+        accountManager.settleTrade(trader, offer.trader, book.symbol, shares, offer.price, offer.price);
         fireOrder(buy.snapshot());
         fireTrade(trade);
         fireOrder(offer.snapshot());
@@ -319,6 +367,7 @@ public class StockExchange {
             if (ask.remaining == 0) {
                 book.asks.removeFirst();
             }
+            accountManager.settleTrade(bid.trader, ask.trader, book.symbol, shares, price, bid.price);
             fireTrade(trade);
             fireOrder(bid.snapshot());
             fireOrder(ask.snapshot());
